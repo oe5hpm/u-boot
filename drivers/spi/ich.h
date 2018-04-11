@@ -214,6 +214,7 @@ struct ich_spi_platdata {
 	enum ich_version ich_version;	/* Controller version*/
 	bool lockdown;			/* lock down controller settings? */
 	unsigned long base;		/* PCI device BAR */
+	unsigned long max_speed;
 };
 
 struct ich_spi_priv {

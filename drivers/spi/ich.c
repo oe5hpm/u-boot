@@ -213,6 +213,10 @@ static int ich_init_controller(struct udevice *dev,
 		return -EINVAL;
 	}
 
+	/* Check devicetree for max frequency */
+	if (plat->max_speed)
+		ctlr->max_speed = plat->max_speed;
+
 	debug("ICH SPI: Version ID %d detected at %p, speed %ld\n",
 	      plat->ich_version, ctlr->base, ctlr->max_speed);
 
@@ -783,6 +787,9 @@ static int ich_spi_ofdata_to_platdata(struct udevice *dev)
 
 	plat->lockdown = fdtdec_get_bool(gd->fdt_blob, node,
 					 "intel,spi-lock-down");
+
+	plat->max_speed = fdtdec_get_uint(gd->fdt_blob, node,
+					  "spi-max-frequency", 0);
 
 	return ret;
 }
