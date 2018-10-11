@@ -862,7 +862,6 @@ e1000_read_eeprom(struct e1000_hw *hw, uint16_t offset,
 	return E1000_SUCCESS;
 }
 
-#ifndef CONFIG_DM_ETH
 /******************************************************************************
  *  e1000_write_eeprom_srwr - Write to Shadow Ram using EEWR
  *  @hw: pointer to the HW structure
@@ -1028,7 +1027,6 @@ static int32_t e1000_update_eeprom_checksum_i210(struct e1000_hw *hw)
 out:
 	return ret_val;
 }
-#endif
 
 /******************************************************************************
  * Verifies that the EEPROM has a valid checksum
@@ -5488,6 +5486,53 @@ void e1000_get_bus_type(struct e1000_hw *hw)
 }
 
 #ifndef CONFIG_DM_ETH
+static int e1000_write_hwaddr(struct eth_device *dev)
+#else
+static int e1000_write_hwaddr(struct udevice *dev)
+#endif
+{
+#ifndef CONFIG_E1000_NO_NVM
+#ifndef CONFIG_DM_ETH
+	unsigned char *mac = dev->enetaddr;
+	struct e1000_hw *hw = dev->priv;
+#else
+	struct eth_pdata *plat = dev_get_platdata(dev);
+	unsigned char *mac = plat->enetaddr;
+	struct e1000_hw *hw = dev_get_priv(dev);
+#endif
+	unsigned char current_mac[6];
+	u16 data[3];
+	int ret_val, i;
+
+	DEBUGOUT("%s: mac=%pM\n", __func__, mac);
+
+	memset(current_mac, 0, 6);
+
+	/* Read from EEPROM, not from registers, to make sure
+	 * the address is persistently configured
+	 */
+	ret_val = e1000_read_mac_addr_from_eeprom(hw, current_mac);
+	DEBUGOUT("%s: current mac=%pM\n", __func__, current_mac);
+
+	/* Only write to EEPROM if the given address is different or
+	 * reading the current address failed
+	 */
+	if (!ret_val && memcmp(current_mac, mac, 6) == 0)
+		return 0;
+
+	for (i = 0; i < 3; ++i)
+		data[i] = mac[i * 2 + 1] << 8 | mac[i * 2];
+
+	ret_val = e1000_write_eeprom_srwr(hw, 0x0, 3, data);
+	if (!ret_val)
+		ret_val = e1000_update_eeprom_checksum_i210(hw);
+	return ret_val;
+#else	/* CONFIG_E1000_NO_NVM */
+	return 0;
+#endif
+}
+
+#ifndef CONFIG_DM_ETH
 /* A list of all registered e1000 devices */
 static LIST_HEAD(e1000_hw_list);
 #endif
@@ -5647,45 +5692,6 @@ e1000_poll(struct eth_device *nic)
 	}
 
 	return len ? 1 : 0;
-}
-
-static int e1000_write_hwaddr(struct eth_device *dev)
-{
-#ifndef CONFIG_E1000_NO_NVM
-	unsigned char *mac = dev->enetaddr;
-	unsigned char current_mac[6];
-	struct e1000_hw *hw = dev->priv;
-	uint16_t data[3];
-	int ret_val, i;
-
-	DEBUGOUT("%s: mac=%pM\n", __func__, mac);
-
-	memset(current_mac, 0, 6);
-
-	/* Read from EEPROM, not from registers, to make sure
-	 * the address is persistently configured
-	 */
-	ret_val = e1000_read_mac_addr_from_eeprom(hw, current_mac);
-	DEBUGOUT("%s: current mac=%pM\n", __func__, current_mac);
-
-	/* Only write to EEPROM if the given address is different or
-	 * reading the current address failed
-	 */
-	if (!ret_val && memcmp(current_mac, mac, 6) == 0)
-		return 0;
-
-	for (i = 0; i < 3; ++i)
-		data[i] = mac[i * 2 + 1] << 8 | mac[i * 2];
-
-	ret_val = e1000_write_eeprom_srwr(hw, 0x0, 3, data);
-
-	if (!ret_val)
-		ret_val = e1000_update_eeprom_checksum_i210(hw);
-
-	return ret_val;
-#else
-	return 0;
-#endif
 }
 
 /**************************************************************************
@@ -5914,6 +5920,7 @@ static const struct eth_ops e1000_eth_ops = {
 	.recv	= e1000_eth_recv,
 	.stop	= e1000_eth_stop,
 	.free_pkt = e1000_free_pkt,
+	.write_hwaddr = e1000_write_hwaddr,
 };
 
 static const struct udevice_id e1000_eth_ids[] = {
