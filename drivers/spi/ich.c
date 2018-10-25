@@ -110,6 +110,34 @@ static int ich9_can_do_33mhz(struct udevice *dev)
 	return speed == 1;
 }
 
+/* @return speed register bit mask from speed */
+static int ich_speed_to_mask(enum ich_version ver, unsigned long speed)
+{
+	int size = 0;
+	const unsigned long *list = NULL;
+	int i;
+	int act = 0;
+	int64_t diff = 0;
+
+	if (ver == ICHV_9) {
+		size = ARRAY_SIZE(ich9_speed);
+		list = ich9_speed;
+	} else if (ver == ICUV_APL) {
+		size = ARRAY_SIZE(pcu_apl_speed);
+		list = pcu_apl_speed;
+	}
+
+	for (i = 1; i < size; i++) {
+		diff = speed - list[i];
+		if (diff >= 0) {
+			if (diff < (speed - list[act]))
+				act = i;
+		}
+	}
+
+	return act;
+}
+
 static int ich_init_controller(struct udevice *dev,
 			       struct ich_spi_platdata *plat,
 			       struct ich_spi_priv *ctlr)
@@ -117,9 +145,14 @@ static int ich_init_controller(struct udevice *dev,
 	ulong sbase_addr;
 	void *sbase;
 
-	/* SBASE is similar */
-	pch_get_spi_base(dev->parent, &sbase_addr);
-	sbase = (void *)sbase_addr;
+	if (plat->ich_version == ICHV_7 ||
+	    plat->ich_version == ICHV_9) {
+		/* SBASE is similar */
+		pch_get_spi_base(dev->parent, &sbase_addr);
+		sbase = (void *)sbase_addr;
+	} else {
+		sbase = (void *)plat->base;
+	}
 	debug("%s: sbase=%p\n", __func__, sbase);
 
 	if (plat->ich_version == ICHV_7) {
@@ -136,6 +169,7 @@ static int ich_init_controller(struct udevice *dev,
 		ctlr->bbar = offsetof(struct ich7_spi_regs, bbar);
 		ctlr->preop = offsetof(struct ich7_spi_regs, preop);
 		ctlr->base = ich7_spi;
+		ctlr->max_speed = 20000000;
 	} else if (plat->ich_version == ICHV_9) {
 		struct ich9_spi_regs *ich9_spi = sbase;
 
@@ -153,20 +187,38 @@ static int ich_init_controller(struct udevice *dev,
 		ctlr->bcr = offsetof(struct ich9_spi_regs, bcr);
 		ctlr->pr = &ich9_spi->pr[0];
 		ctlr->base = ich9_spi;
+		if (ich9_can_do_33mhz(dev))
+			ctlr->max_speed = 33000000;
+		else
+			ctlr->max_speed = 20000000;
+	} else if (plat->ich_version == ICUV_APL) {
+		struct pcu_apl_spi_regs *pcu_spi = sbase;
+
+		ctlr->opmenu = offsetof(struct pcu_apl_spi_regs, opmenu);
+		ctlr->menubytes = sizeof(pcu_spi->opmenu);
+		ctlr->optype = offsetof(struct pcu_apl_spi_regs, optype);
+		ctlr->addr = offsetof(struct pcu_apl_spi_regs, faddr);
+		ctlr->data = offsetof(struct pcu_apl_spi_regs, fdata);
+		ctlr->databytes = sizeof(pcu_spi->fdata);
+		ctlr->status = offsetof(struct pcu_apl_spi_regs, ssfs);
+		ctlr->control = offsetof(struct pcu_apl_spi_regs, ssfc);
+		ctlr->speed = ctlr->control + 2;
+		ctlr->preop = offsetof(struct pcu_apl_spi_regs, preop);
+		ctlr->pr = &pcu_spi->pr[0];
+		ctlr->base = pcu_spi;
+		ctlr->max_speed = 120000000;
 	} else {
 		debug("ICH SPI: Unrecognised ICH version %d\n",
 		      plat->ich_version);
 		return -EINVAL;
 	}
 
-	/* Work out the maximum speed we can support */
-	ctlr->max_speed = 20000000;
-	if (plat->ich_version == ICHV_9 && ich9_can_do_33mhz(dev))
-		ctlr->max_speed = 33000000;
 	debug("ICH SPI: Version ID %d detected at %p, speed %ld\n",
 	      plat->ich_version, ctlr->base, ctlr->max_speed);
 
-	ich_set_bbar(ctlr, 0);
+	if (plat->ich_version == ICHV_7 ||
+	    plat->ich_version == ICHV_9)
+		ich_set_bbar(ctlr, 0);
 
 	return 0;
 }
@@ -193,6 +245,10 @@ static void spi_lock_down(struct ich_spi_platdata *plat, void *sbase)
 		struct ich9_spi_regs *ich9_spi = sbase;
 
 		setbits_le16(&ich9_spi->hsfs, HSFS_FLOCKDN);
+	} else if (plat->ich_version == ICUV_APL) {
+		struct pcu_apl_spi_regs *ipcu_spi = sbase;
+
+		setbits_le16(&ipcu_spi->hsfs, HSFS_FLOCKDN);
 	}
 }
 
@@ -208,6 +264,10 @@ static bool spi_lock_status(struct ich_spi_platdata *plat, void *sbase)
 		struct ich9_spi_regs *ich9_spi = sbase;
 
 		lock = readw(&ich9_spi->hsfs) & HSFS_FLOCKDN;
+	} else if (plat->ich_version == ICUV_APL) {
+		struct pcu_apl_spi_regs *ipcu_spi = sbase;
+
+		lock = readw(&ipcu_spi->hsfs) & HSFS_FLOCKDN;
 	}
 
 	return lock != 0;
@@ -461,15 +521,16 @@ static int ich_spi_xfer(struct udevice *dev, unsigned int bitlen,
 		return 0;
 	}
 
-	if (ctlr->speed && ctlr->max_speed >= 33000000) {
+	/* Set speed if possible */
+	if (!lock && ctlr->speed) {
 		int byte;
 
 		byte = ich_readb(ctlr, ctlr->speed);
-		if (ctlr->cur_speed >= 33000000)
-			byte |= SSFC_SCF_33MHZ;
-		else
-			byte &= ~SSFC_SCF_33MHZ;
-		ich_writeb(ctlr, byte, ctlr->speed);
+		if ((byte & 0x7) != ctlr->cur_speed) {
+			byte &= ~0x07;
+			byte |= ctlr->cur_speed;
+			ich_writeb(ctlr, byte, ctlr->speed);
+		}
 	}
 
 	/* See if we have used up the command data */
@@ -591,17 +652,25 @@ static int ich_spi_probe(struct udevice *dev)
 	ret = ich_init_controller(dev, plat, priv);
 	if (ret)
 		return ret;
-	/* Disable the BIOS write protect so write commands are allowed */
-	ret = pch_set_spi_protect(dev->parent, false);
-	if (ret == -ENOSYS) {
-		bios_cntl = ich_readb(priv, priv->bcr);
-		bios_cntl &= ~BIT(5);	/* clear Enable InSMM_STS (EISS) */
-		bios_cntl |= 1;		/* Write Protect Disable (WPD) */
-		ich_writeb(priv, bios_cntl, priv->bcr);
-	} else if (ret) {
-		debug("%s: Failed to disable write-protect: err=%d\n",
-		      __func__, ret);
-		return ret;
+
+	if (plat->ich_version == ICHV_9 || plat->ich_version == ICHV_7) {
+		/* Disable the BIOS write protection */
+		ret = pch_set_spi_protect(dev->parent, false);
+		if (ret == -ENOSYS) {
+			bios_cntl = ich_readb(priv, priv->bcr);
+			bios_cntl &= ~BIT(5); /* clear Enable (EISS) */
+			bios_cntl |= 1; /* Write Protect Disable (WPD) */
+			ich_writeb(priv, bios_cntl, priv->bcr);
+		} else if (ret) {
+			debug("%s: Failed to disable write-protect: err=%d\n",
+			__func__, ret);
+			return ret;
+		}
+	} else if (plat->ich_version == ICUV_APL) {
+		dm_pci_read_config8(dev, 0xdc, &bios_cntl);
+		bios_cntl &= ~BIT(5); /* clear Enable (EISS) */
+		bios_cntl |= 1; /* Write Protect Disable (WPD) */
+		dm_pci_write_config8(dev, 0xdc, bios_cntl);
 	}
 
 	/* Lock down SPI controller settings if required */
@@ -610,7 +679,7 @@ static int ich_spi_probe(struct udevice *dev)
 		spi_lock_down(plat, priv->base);
 	}
 
-	priv->cur_speed = priv->max_speed;
+	priv->cur_speed = ich_speed_to_mask(plat->ich_version, priv->max_speed);
 
 	return 0;
 }
@@ -629,8 +698,9 @@ static int ich_spi_remove(struct udevice *bus)
 static int ich_spi_set_speed(struct udevice *bus, uint speed)
 {
 	struct ich_spi_priv *priv = dev_get_priv(bus);
+	struct ich_spi_platdata *plat = dev_get_platdata(bus);
 
-	priv->cur_speed = speed;
+	priv->cur_speed = ich_speed_to_mask(plat->ich_version, speed);
 
 	return 0;
 }
@@ -671,13 +741,44 @@ static int ich_spi_ofdata_to_platdata(struct udevice *dev)
 	int ret;
 
 	ret = fdt_node_check_compatible(gd->fdt_blob, node, "intel,ich7-spi");
-	if (ret == 0) {
+	if (ret == 0)
 		plat->ich_version = ICHV_7;
-	} else {
-		ret = fdt_node_check_compatible(gd->fdt_blob, node,
-						"intel,ich9-spi");
-		if (ret == 0)
-			plat->ich_version = ICHV_9;
+
+	ret = fdt_node_check_compatible(gd->fdt_blob, node, "intel,ich9-spi");
+	if (ret == 0)
+		plat->ich_version = ICHV_9;
+
+	ret = fdt_node_check_compatible(gd->fdt_blob, node, "intel,ipcu-spi");
+	if (ret == 0)
+		plat->ich_version = ICUV_APL;
+
+	/* for PCH / PCU platforms we need to get the address/bdf from the DT */
+	if (plat->ich_version == ICUV_APL) {
+		fdt_addr_t addr;
+
+		addr = dev_read_addr(dev);
+#if defined(CONFIG_PCI) && defined(CONFIG_DM_PCI)
+		if (addr == FDT_ADDR_T_NONE) {
+			struct fdt_pci_addr pci_addr;
+			u32 bar;
+			int ret;
+
+			ret = fdtdec_get_pci_addr(gd->fdt_blob,
+						  dev_of_offset(dev),
+						  FDT_PCI_SPACE_MEM32,
+						  "reg", &pci_addr);
+
+			ret = fdtdec_get_pci_bar32(dev, &pci_addr, &bar);
+			if (ret)
+				return ret;
+
+			addr = bar;
+		}
+#endif
+		if (addr == FDT_ADDR_T_NONE)
+			return -EINVAL;
+
+		plat->base = (unsigned long)map_physmem(addr, 0, MAP_NOCACHE);
 	}
 
 	plat->lockdown = fdtdec_get_bool(gd->fdt_blob, node,
@@ -699,6 +800,7 @@ static const struct dm_spi_ops ich_spi_ops = {
 static const struct udevice_id ich_spi_ids[] = {
 	{ .compatible = "intel,ich7-spi" },
 	{ .compatible = "intel,ich9-spi" },
+	{ .compatible = "intel,ipcu-apl-spi" },
 	{ }
 };
 

@@ -54,6 +54,44 @@ struct ich9_spi_regs {
 	uint32_t bcr;
 } __packed;
 
+const unsigned long ich9_speed[] = {20000000, 33000000};
+
+struct pcu_apl_spi_regs {
+	uint32_t bfpr;		/* 0x00 */
+	uint16_t hsfs;
+	uint16_t hsfc;
+	uint32_t faddr;		/* 0x08 */
+	uint32_t dlb;
+	uint32_t fdata[16];	/* 0x10 */
+	uint32_t frap;		/* 0x50 */
+	uint32_t freg[12];
+	uint32_t pr[5];		/* 0x84 */
+	uint32_t gpr;
+	uint8_t _reserved0[4];
+	uint8_t ssfs;		/* 0xa0 */
+	uint8_t ssfc[3];
+	uint16_t preop;		/* 0xa4 */
+	uint16_t optype;
+	uint8_t opmenu[8];	/* 0xa8 */
+	uint32_t sfrap;
+	uint32_t fdoc;		/* 0xb4 */
+	uint32_t fdod;
+	uint8_t _reserved1[4];
+	uint32_t afc;		/* 0xc0 */
+	uint32_t lvscc;
+	uint32_t uvscc;
+	uint8_t _reserved2[4];
+	uint32_t fpb;		/* 0xd0 */
+	uint8_t _reserved3[28];
+	uint32_t srdl;		/* 0xf0 */
+	uint32_t srdc;
+	uint32_t scs;
+	uint32_t bcr;
+} __packed;
+
+const unsigned long pcu_apl_speed[] = {120000000, 60000000, 48000000, 40000000,
+				       30000000, 24000000, 17000000};
+
 enum {
 	SPIS_SCIP =		0x0001,
 	SPIS_GRANT =		0x0002,
@@ -169,11 +207,13 @@ struct spi_trans {
 enum ich_version {
 	ICHV_7,
 	ICHV_9,
+	ICUV_APL,
 };
 
 struct ich_spi_platdata {
-	enum ich_version ich_version;	/* Controller version, 7 or 9 */
+	enum ich_version ich_version;	/* Controller version*/
 	bool lockdown;			/* lock down controller settings? */
+	unsigned long base;		/* PCI device BAR */
 };
 
 struct ich_spi_priv {
@@ -189,10 +229,10 @@ struct ich_spi_priv {
 	int control;
 	int bbar;
 	int bcr;
-	uint32_t *pr;		/* only for ich9 */
+	uint32_t *pr;
 	int speed;		/* pointer to speed control */
 	ulong max_speed;	/* Maximum bus speed in MHz */
-	ulong cur_speed;	/* Current bus speed */
+	uint8_t cur_speed;	/* Current bus speed mask */
 	struct spi_trans trans;	/* current transaction in progress */
 };
 
